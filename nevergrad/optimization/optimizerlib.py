@@ -23,7 +23,7 @@ from .recastlib import *
 
 @registry.register
 class OnePlusOne(base.Optimizer):
-    """Simple but sometimes powerfull optimization algorithm.
+    """Simple but sometimes powerful optimization algorithm.
 
     We use the one-fifth adaptation rule, going back to Schumer and Steiglitz (1968).
     It was independently rediscovered by Devroye (1972) and Rechenberg (1973).
@@ -54,7 +54,7 @@ class CauchyOnePlusOne(OnePlusOne):
 
     Many papers use Cauchy mutations, maybe the first one was
     X. Yao, Y. Liu and G. Lin, Evolutionary Programing Made Faster, IEEE
-    Transacations on Evolutionary Computation, vol. 3, 82-102, July 1999.
+    Transactions on Evolutionary Computation, vol. 3, 82-102, July 1999.
     """
 
     def _internal_ask(self) -> base.ArrayLike:
@@ -439,3 +439,71 @@ class PSO(base.Optimizer):
         output = stats.norm.ppf(x)
         assert not any(x for x in np.isnan(output)), f"Encountered NaN value {output}"
         return output
+
+
+@registry.register
+class SPSA(base.Optimizer):
+    # pylint: disable=too-many-instance-attributes
+    ''' The First order SPSA algorithm as shown in [1,2,3], with implementation details
+    from [4,5].
+
+    [1] https://en.wikipedia.org/wiki/Simultaneous_perturbation_stochastic_approximation
+    [2] https://www.chessprogramming.org/SPSA
+    [3] Spall, James C. "Multivariate stochastic approximation using a simultaneous perturbation gradient approximation."
+        IEEE transactions on automatic control 37.3 (1992): 332-341.
+    [4] Section 7.5.2 in "Introduction to Stochastic Search and Optimization: Estimation, Simulation and Control" by James C. Spall.
+    [5] Pushpendre Rastogi, Jingyi Zhu, James C. Spall CISS (2016).
+        Efficient implementation of Enhanced Adaptive Simultaneous Perturbation Algorithms.
+    '''
+    no_parallelization = True
+
+    def __init__(self, dimension: int, budget: Optional[int] = None, num_workers: int = 1) -> None:
+        super().__init__(dimension, budget=budget, num_workers=num_workers)
+        self._rng = np.random.RandomState(np.random.randint(2**32))
+        self.init = True
+        self.idx = 0
+        self.delta = float('nan')
+        self.ym: Optional[np.ndarray] = None
+        self.yp: Optional[np.ndarray] = None
+        self.t = np.zeros(self.dimension)
+        self.avg = np.zeros(self.dimension)
+        # Set A, a, c according to the practical implementation
+        # guidelines in the ISSO book.
+        self.A = (10 if budget is None else max(10, budget // 20))
+        # TODO: We should spend first 10-20 iterations
+        # to estimate the noise standard deviation and
+        # then set c = standard deviation. 1e-1 is arbitrary.
+        self.c = 1e-1
+        # TODO: We should chose a to be inversely proportional to
+        # the magnitude of gradient and propotional to (1+A)^0.602
+        # we should spend some burn-in iterations to estimate the
+        # magnitude of the gradient. 1e-5 is arbitrary.
+        self.a = 1e-5
+
+    def ck(self, k: int) -> float:
+        'c_k determines the pertubation.'
+        return self.c / (k//2 + 1)**0.101
+
+    def ak(self, k: int) -> float:
+        'a_k is the learning rate.'
+        return self.a / (k//2 + 1 + self.A)**0.602
+
+    def _internal_ask(self) -> base.ArrayLike:
+        k = self.idx
+        if k % 2 == 0:
+            if not self.init:
+                assert self.yp is not None and self.ym is not None
+                self.t -= (self.ak(k) * (self.yp - self.ym) / 2 / self.ck(k)) * self.delta
+                self.avg += (self.t - self.avg) / (k // 2 + 1)
+            self.delta = 2 * self._rng.randint(2, size=self.dimension) - 1
+            return self.t - self.ck(k) * self.delta
+        return self.t + self.ck(k) * self.delta
+
+    def _internal_tell(self, x: base.ArrayLike, value: float) -> None:
+        setattr(self, ('ym' if self.idx % 2 == 0 else 'yp'), np.array(value, copy=True))
+        self.idx += 1
+        if self.init and self.yp is not None and self.ym is not None:
+            self.init = False
+
+    def _internal_provide_recommendation(self) -> base.ArrayLike:
+        return self.avg

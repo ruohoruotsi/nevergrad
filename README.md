@@ -2,10 +2,18 @@
 
 # Nevergrad - A gradient-free optimization platform
 
-`nevergrad` is a Python3 library. It can be installed with:
+`nevergrad` is a Python 3.6+ library. It can be installed with:
+
 ```
-pip install -e git+git@github.com:facebookresearch/nevergrad@master#egg=nevergrad
+pip install nevergrad
 ```
+
+You can also install the master branch instead of the latest release with:
+
+```
+pip install git+https://github.com/facebookresearch/nevergrad@master#egg=nevergrad
+```
+
 Alternatively, you can clone the repository and run `python3 setup.py develop` from inside the repository folder.
 
 ## Goals and structure
@@ -59,7 +67,7 @@ An *ask and tell* interface is also available. The 3 key methods for this interf
 - `ask`: suggest a point on which to evaluate the function to optimize.
 - `tell`: for updated the optimizer with the value of the function at a given point.
 - `provide_recommendation`: returns the point the algorithms considers the best.
-For most optimization algorithms in the platform, they can be called in arbitrary order - asynchronous optimization is OK.
+For most optimization algorithms in the platform, they can be called in arbitrary order - asynchronous optimization is OK. Some algorithms (with class attribute `no_parallelization=True` however do not support this.
 
 Here is a simpler example in the sequential case (this is what happens in the `optimize` method for `num_workers=1`):
 ```python
@@ -116,9 +124,9 @@ Example (please note that `nevergrad` needs to be cloned in your working directo
 ```
 python -m nevergrad.benchmark additional_experiment --imports=nevergrad/benchmark/additional/example.py
 ```
-See the [example file](nevergrad/benchmark/additional/example.py) to understand more precisely how functions/optimizers/experiments are specified. You can also submit a pull request to add your code directly in `nevergrad`.
+See the [example file](nevergrad/benchmark/additional/example.py) to understand more precisely how functions/optimizers/experiments are specified. You can also submit a pull request to add your code directly in `nevergrad`. In this case, please refer to these [guidelines](docs/adding_an_algorithm.md).
 
-Functions used for the experiments must derive from `nevergrad.functions.BaseFunction`. This abstract class helps you set up a description of your function settings through the `get_summary` method,  which is called to create the columns of the data file produced by the experiments. See the docstrings for more information, and [functionlib.py](nevergrad/functions/functionlib.py) and [example.py](nevergrad/benchmark/additional/example.py) for examples.
+Functions used for the experiments must derive from `nevergrad.functions.BaseFunction`. This abstract class helps you set up a description of your function settings through the `_descriptors` attribute,  which is used to create the columns of the data file produced by the experiments. See the docstrings for more information, and [functionlib.py](nevergrad/functions/functionlib.py) and [example.py](nevergrad/benchmark/additional/example.py) for examples.
 
 If you want your experiment plan to be seedable, be extra careful as to how you handle randomness in the experiment generator, since each individual experiment may be run in any order. See [experiments.py](nevergrad/benchmark/experiments.py) for examples of seedable experiment plans. If you do not care for it. For simplicity's sake, the experiment plan generator is however not required to have a seed parameter (but will not be reproducible in this case).
 
@@ -224,7 +232,7 @@ Placeholder 0: Value 110.0, from data: [1]
 
 Some important things to note:
  - using `FolderFunction` argument `clean_copy=True` will copy your folder so that tempering with it during optimization will run different versions of your code.
- - under the hood, with or without `clean_copy=True`, when calling the function, `FolderFunction` will create symlink copy of the initial folder, remove the files that have tokens, and create new ones with appropriate values. Symlinks are used in order to avoid deplicating large projects, but they have some drawbacks, see next point ;)
+ - under the hood, with or without `clean_copy=True`, when calling the function, `FolderFunction` will create symlink copy of the initial folder, remove the files that have tokens, and create new ones with appropriate values. Symlinks are used in order to avoid duplicating large projects, but they have some drawbacks, see next point ;)
  - one can add a compilation step to `FolderFunction` (the compilation just has to be included in the script). However, be extra careful that if the initial folder contains some build files, they could be modified by the compilation step, because of the symlinks. Make sure that during compilation, you remove the build symlinks first! **This feature has not been fool proofed yet!!!**
 
 
@@ -251,14 +259,16 @@ pre-commit install
 
 ## Citing
 
+```bibtex
 @misc{nevergrad,
-author = {J. Rapin and O. Teytaud},
-title = {Nevergrad - A gradient-free optimization platform},
-year = {2018},
-publisher = {GitHub},
-journal = {GitHub repository},
-howpublished = {\url{https://github.com/facebookresearch/nevergrad/}},
+    author = {J. Rapin and O. Teytaud},
+    title = {{Nevergrad - A gradient-free optimization platform}},
+    year = {2018},
+    publisher = {GitHub},
+    journal = {GitHub repository},
+    howpublished = {\url{https://GitHub.com/FacebookResearch/Nevergrad}},
 }
+```
 
 
 ## License

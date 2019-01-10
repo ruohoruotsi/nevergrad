@@ -16,6 +16,8 @@ from . import utils
 
 registry = Registry()
 
+_OptimCallBack = Union[Callable[["Optimizer", ArrayLike, float], None], Callable[["Optimizer"], None]]
+
 
 class InefficientSettingsWarning(RuntimeWarning):
     pass
@@ -32,7 +34,7 @@ class Optimizer(abc.ABC):  # pylint: disable=too-many-instance-attributes
     one would call provide_recommendation for the estimated optimum.
 
     This class is abstract, it provides _internal equivalents for the 3 main functions,
-    among which at least _internal_suggest_exploration must be overriden.
+    among which at least _internal_suggest_exploration must be overridden.
 
     Each optimizer instance should be used only once, with the initial provided budget
 
@@ -43,7 +45,7 @@ class Optimizer(abc.ABC):  # pylint: disable=too-many-instance-attributes
     budget: int/None
         number of allowed evaluations
     num_workers: int
-        number of evaluations which will be run in parallell at once
+        number of evaluations which will be run in parallel at once
     """
     # pylint: disable=too-many-locals
 
@@ -85,8 +87,7 @@ class Optimizer(abc.ABC):  # pylint: disable=too-many-instance-attributes
     def __repr__(self) -> str:
         return f"Instance of {self.name}(dimension={self.dimension}, budget={self.budget}, num_workers={self.num_workers})"
 
-    def register_callback(self, name: str, callback: Union[Callable[["Optimizer", ArrayLike, float], None],
-                                                           Callable[["Optimizer"], None]]) -> None:
+    def register_callback(self, name: str, callback: _OptimCallBack) -> None:
         """Add a callback method called either when "tell" or "ask" are called, with the same
         arguments (including the optimizer / self). This can be useful for custom logging.
 
