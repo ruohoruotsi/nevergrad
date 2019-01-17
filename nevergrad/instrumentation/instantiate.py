@@ -3,16 +3,15 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
-from itertools import chain
 import os
 import re
 import tempfile
 import operator
 import contextlib
 from pathlib import Path
-from collections import OrderedDict
 from typing import Union, List, Any, Optional, Generator, Callable, Tuple, Dict
 import numpy as np
+from ..functions import base
 from ..common.typetools import ArrayLike
 from . import utils
 from . import variables
@@ -50,7 +49,7 @@ def uncomment_line(line: str, extension: str) -> str:
     return line
 
 
-class InstrumentizedFile(utils.Instrument):
+class InstrumentedFile(utils.Instrument):
 
     def __init__(self, filepath: Path) -> None:
         self.filepath = filepath
@@ -64,10 +63,13 @@ class InstrumentizedFile(utils.Instrument):
             text = "\n".join(lines)
         self.text, self.variables = utils.replace_tokens_by_placeholders(text)
 
-    def process(self, data: np.ndarray) -> str:
-        values = utils.process_instruments(self.variables, data)
+    def process(self, data: np.ndarray, deterministic: bool = False) -> str:
+        values = utils.process_instruments(self.variables, data, deterministic=deterministic)
         text = utils.replace_placeholders_by_values(self.text, values)
         return text
+
+    def process_arg(self, arg: Any) -> ArrayLike:
+        raise NotImplementedError
 
     @property
     def dimension(self) -> int:
@@ -90,18 +92,18 @@ class InstrumentizedFile(utils.Instrument):
         return "\n".join(strings)
 
 
-class InstrumentizedFolder:
+class InstrumentedFolder:  # should derive from base function?
     """Folder with instrumentation tokens, which can be instantiated.
 
     Parameters
     ----------
     folder: str/Path
-        the instrumentized folder to instantiate
+        the instrumented folder to instantiate
     clean_copy: bool
         whether to create an initial clean temporary copy of the folder in order to avoid
         versioning problems (instantiations are lightweight symlinks in any case).
     extensions: list
-        extensions of the instrumentized files which must be instantiated
+        extensions of the instrumented files which must be instantiated
 
     Caution
     -------
@@ -121,28 +123,28 @@ class InstrumentizedFolder:
             self.folder = self._clean_copy.copyname
         if extensions is None:
             extensions = [".py", "m", ".cpp", ".hpp", ".c", ".h"]
-        self.instrumentized_files: List[InstrumentizedFile] = []
+        self.instrumented_files: List[InstrumentedFile] = []
         for fp in self.folder.glob("**/*"):  # TODO filter out all hidden files
             if fp.is_file() and fp.suffix in extensions:
-                instru_f = InstrumentizedFile(fp)
+                instru_f = InstrumentedFile(fp)
                 if instru_f.dimension:
-                    self.instrumentized_files.append(instru_f)
-        assert self.instrumentized_files, "Found no instrumentized file"
-        self.instrumentized_files = sorted(self.instrumentized_files, key=operator.attrgetter("filepath"))
+                    self.instrumented_files.append(instru_f)
+        assert self.instrumented_files, "Found no instrumented file"
+        self.instrumented_files = sorted(self.instrumented_files, key=operator.attrgetter("filepath"))
 
     def __repr__(self) -> str:
-        return f'{self.__class__.__name__}("{self.folder}") with files:\n{self.instrumentized_files}'
+        return f'{self.__class__.__name__}("{self.folder}") with files:\n{self.instrumented_files}'
 
     @property
     def dimension(self) -> int:
-        return sum(i.dimension for i in self.instrumentized_files)
+        return sum(i.dimension for i in self.instrumented_files)
 
     def instantiate_to_folder(self, data: np.ndarray, outfolder: Union[Path, str]) -> None:
         outfolder = Path(outfolder).expanduser().absolute()
         assert outfolder != self.folder, "Do not instantiate on same folder!"
         symlink_folder_tree(self.folder, outfolder)
-        texts = utils.process_instruments(self.instrumentized_files, data)  # instantiable files have same pattern as token
-        for instantiable, text in zip(self.instrumentized_files, texts):
+        texts = utils.process_instruments(self.instrumented_files, data)  # instantiable files have same pattern as token
+        for instantiable, text in zip(self.instrumented_files, texts):
             inst_fp = outfolder / instantiable.filepath.relative_to(self.folder)
             os.remove(str(inst_fp))  # remove symlink to avoid writing in original dir
             with inst_fp.open("w") as f:
@@ -156,14 +158,14 @@ class InstrumentizedFolder:
             yield subtempfolder
 
     def get_summary(self, data: np.ndarray) -> str:
-        splitted_data = utils.split_data(data, self.instrumentized_files)
+        splitted_data = utils.split_data(data, self.instrumented_files)
         strings = []
-        for ifile, sdata in zip(self.instrumentized_files, splitted_data):
+        for ifile, sdata in zip(self.instrumented_files, splitted_data):
             strings.append(ifile.get_summary(sdata))
         return "\n\n".join(strings)
 
 
-class InstrumentedFunction:
+class InstrumentedFunction(base.BaseFunction):
     """Converts a multi-argument function into a mono-argument multidimensional continuous function
     which can be optimized.
 
@@ -172,69 +174,68 @@ class InstrumentedFunction:
     function: callable
         the callable to convert
     *args, **kwargs: Any
-        Any argument. Arguments of type variables.SoftmaxCategorical or variabls.Gaussian will be instrumentized
+        Any argument. Arguments of type variables.SoftmaxCategorical or variables.Gaussian will be instrumented
         and others will be kept constant.
 
     Note
     ----
-    Tokens can be:
-    - DiscreteToken(list_of_n_possible_values): converted into a n-dim array, corresponding to proba for each value
-    - GaussianToken(mean, std, shape=None): a Gaussian variable (shape=None) or array.
+    - Tokens can be:
+      - DiscreteToken(list_of_n_possible_values): converted into a n-dim array, corresponding to proba for each value
+      - GaussianToken(mean, std, shape=None): a Gaussian variable (shape=None) or array.
+    - This function can then be directly used in benchmarks *if it returns a float*.
+
     """
 
     def __init__(self, function: Callable, *args: Any, **kwargs: Any) -> None:
         assert callable(function)
-        self._args = [variables._Constant.convert_non_token(x) for x in args]
-        self._kwargs = OrderedDict(sorted((x, variables._Constant.convert_non_token(y)) for x, y in kwargs.items()))  # make deteriministic
+        self.instrumentation = variables.Instrumentation(*args, **kwargs)
+        super().__init__(dimension=self.instrumentation.dimension)
+        # keep track of what is instrumented (but "how" is probably too long/complex)
+        instrumented = [f"arg{k}" if name is None else name for k, name in enumerate(self.instrumentation.names)
+                        if not isinstance(self.instrumentation.instruments[k], variables._Constant)]
+        name = function.__name__ if hasattr(function, "__name__") else function.__class__.__name__
+        self._descriptors.update(name=name, instrumented=",".join(instrumented))
         self._function = function
         self.last_call_args: Optional[Tuple[Any, ...]] = None
         self.last_call_kwargs: Optional[Dict[str, Any]] = None
 
-    @property
-    def dimension(self) -> int:
-        """Dimension of the input space
-        """
-        return sum(x.dimension for x in self._args + list(self._kwargs.values()))
-
-    def convert_to_arguments(self, data: np.ndarray) -> Tuple[Tuple[Any, ...], Dict[str, Any]]:
+    def convert_to_arguments(self, data: np.ndarray, deterministic: bool = True) -> Tuple[Tuple[Any, ...], Dict[str, Any]]:
         """Get the arguments and keyword arguments corresponding to the data
+
+        Parameters
+        ----------
+        data: np.ndarray
+            input data
+        deterministic: bool
+            whether to process the data deterministically (some Variables such as SoftmaxCategorical are stochastic).
+            If True, the output is the most likely output.
         """
-        data = np.array(data, copy=False)
-        assert data.shape == (self.dimension,), f"Erroneous shape {data.shape}"
-        args_dim = sum(x.dimension for x in self._args)
-        args = utils.process_instruments(self._args, data[:args_dim])
-        kwvals = utils.process_instruments(self._kwargs.values(), data[args_dim:])
-        kwargs = OrderedDict((kw, v) for kw, v in zip(self._kwargs.keys(), kwvals))
-        return args, kwargs
+        return self.instrumentation.data_to_arguments(data, deterministic=deterministic)
 
     def convert_to_data(self, *args: Any, **kwargs: Any) -> ArrayLike:
-        instruments = self._args + list(self._kwargs.values())
-        ordered_args = args + tuple(kwargs[key] for key in self._kwargs.keys())  # Match the internal order of args
-        # Process and flatten all args
-        data = chain.from_iterable([instrument.process_arg(arg) for instrument, arg in zip(instruments, ordered_args)])
-        return data
+        return self.instrumentation.arguments_to_data(*args, **kwargs)
 
-    def __call__(self, data: np.ndarray) -> Any:
-        self.last_call_args, self.last_call_kwargs = self.convert_to_arguments(data)
+    def oracle_call(self, x: np.ndarray) -> Any:
+        self.last_call_args, self.last_call_kwargs = self.convert_to_arguments(x, deterministic=False)
         return self._function(*self.last_call_args, **self.last_call_kwargs)
 
-    def get_summary(self, data: np.ndarray) -> Any:  # probably inpractical for large arrays
+    def __call__(self, x: np.ndarray) -> Any:
+        # BaseFunction __call__ method should generally not be overriden,
+        # but here that would mess up with typing, and I would rather not constrain
+        # user to return only floats.
+        x = self.transform(x)
+        return self.oracle_call(x)
+
+    def get_summary(self, data: np.ndarray) -> Any:  # probably impractical for large arrays
         """Prints the summary corresponding to the provided data
         """
-        data = np.array(data, copy=False)
-        assert data.shape == (self.dimension,), f"Erroneous shape {data.shape}"
-        args_dim = sum(x.dimension for x in self._args)
         strings = []
-        # args
-        splitted_data = utils.split_data(data[:args_dim], self._args)
-        for k, (token, d) in enumerate(zip(self._args, splitted_data)):
-            if not isinstance(token, variables._Constant):
-                explanation = token.get_summary(d)
-                strings.append(f"arg #{k + 1}: {explanation}")
-        # kwargs
-        splitted_data = utils.split_data(data[args_dim:], self._kwargs.values())
-        for (kw, token), d in zip(self._kwargs.items(), splitted_data):
-            if not isinstance(token, variables._Constant):
-                explanation = token.get_summary(d)
-                strings.append(f'kwarg "{kw}": {explanation}')
+        names = self.instrumentation.names
+        instruments = self.instrumentation.instruments
+        splitted_data = utils.split_data(data, instruments)
+        for k, (name, var, d) in enumerate(zip(names, instruments, splitted_data)):
+            if not isinstance(var, variables._Constant):
+                explanation = var.get_summary(d)
+                sname = f"arg #{k + 1}" if name is None else f'kwarg "{name}"'
+                strings.append(f"{sname}: {explanation}")
         return " - " + "\n - ".join(strings)

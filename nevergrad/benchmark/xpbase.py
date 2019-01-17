@@ -54,7 +54,7 @@ def create_seed_generator(seed: Optional[int]) -> Iterator[Optional[int]]:
     """
     generator = None if seed is None else np.random.RandomState(seed=seed)
     while True:
-        yield None if generator is None else generator.randint(np.iinfo(np.uint32).max)
+        yield None if generator is None else generator.randint(2**32, dtype=np.uint32)
 
 
 class Experiment:
@@ -63,7 +63,7 @@ class Experiment:
     Parameters
     ----------
     function: BaseFunction
-        the function to run the experiment on. It must inherit from BaseFunction so that to implement
+        the function to run the experiment on. It must inherit from BaseFunction to implement
         descriptors for the function.
 
     Note
@@ -120,8 +120,21 @@ class Experiment:
             print("\n", file=sys.stderr)
         return self.get_description()
 
+    def _log_results(self, t0: float, num_calls: int, recommendation: float) -> None:
+        """Internal method for logging results before handling the error
+        """
+        num_eval = 100  # evaluations of the cost function on the recommendation
+        self.result["elapsed_time"] = time.time() - t0
+        # make a final evaluation with oracle (no noise, but function may still be stochastic)
+        t_recommendation = self.function.transform(recommendation)
+        self.result["loss"] = sum(self.function.oracle_call(t_recommendation) for _ in range(num_eval)) / num_eval
+        self.result["elapsed_budget"] = num_calls
+        if num_calls > self._optimizer_parameters["budget"]:  # type: ignore
+            optim_name = self._optimizer_parameters["optimizer_name"]
+            raise RuntimeError(f"Too much elapsed budget {num_calls} for {optim_name} on {self.function}")
+
     def _run_with_error(self, callbacks: Optional[Dict[str, base._OptimCallBack]] = None) -> None:
-        """Run an experiment with the provided artificial function and optmizer
+        """Run an experiment with the provided artificial function and optimizer
 
         Parameter
         ---------
@@ -144,15 +157,13 @@ class Experiment:
         counter = CallCounter(self.function)
         with warnings.catch_warnings():
             warnings.filterwarnings("ignore", category=base.InefficientSettingsWarning)  # benchmark do not need to be efficient
-            recommendation = optimizer.optimize(counter, batch_mode=True)
-        self.result["elapsed_time"] = time.time() - t0
-        # make a final evaluation with oracle (no noise, but function may still be stochastic)
-        num_eval = 100
-        t_recommendation = self.function.transform(recommendation)
-        self.result["loss"] = sum(self.function.oracle_call(t_recommendation) for _ in range(num_eval)) / num_eval
-        self.result["elapsed_budget"] = counter.num_calls
-        if self.result["elapsed_budget"] > optimizer.budget:
-            raise RuntimeError(f"Too much elapsed budget {self.result['elapsed_budget']} for {optimizer} on {self.function}")
+            try:
+                recommendation = optimizer.optimize(counter, batch_mode=True)
+            except Exception as e:  # pylint: disable=broad-except
+                recommendation = optimizer.provide_recommendation()  # get the recommendation anyway
+                self._log_results(t0, counter.num_calls, recommendation)
+                raise e
+        self._log_results(t0, counter.num_calls, recommendation)
 
     def get_description(self) -> Dict[str, Union[str, float, bool]]:
         """Return the description of the experiment, as a dict.

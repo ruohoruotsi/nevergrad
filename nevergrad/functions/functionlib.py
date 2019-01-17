@@ -8,11 +8,11 @@ from typing import List
 import numpy as np
 from . import utils
 from . import corefuncs
-from .base import BaseFunction
+from .base import ArtificiallyNoisyBaseFunction
 from ..common import tools
 
 
-class ArtificialFunction(BaseFunction):
+class ArtificialFunction(ArtificiallyNoisyBaseFunction):
     """Artificial function object. This allows the creation of functions with different
     dimension and structure to be used for benchmarking in many different settings.
 
@@ -31,6 +31,8 @@ class ArtificialFunction(BaseFunction):
         The full dimension of the function is therefore useless_variables + num_blocks * core_dimension
     noise_level: float
         noise level for the additive noise: noise_level * N(0, 1, size=1) * [f(x + N(0, 1, size=dim)) - f(x)]
+    noise_dissymmetry: bool
+        True if we dissymmetrize the model of noise
     rotation: bool
         whether the block space should be rotated (random rotation)
     hashing: bool
@@ -60,8 +62,9 @@ class ArtificialFunction(BaseFunction):
     """
 
     def __init__(self, name: str, block_dimension: int, num_blocks: int = 1,  # pylint: disable=too-many-arguments
-                 useless_variables: int = 0, noise_level: float = 0, rotation: bool = False,
-                 translation_factor: int = 1, hashing: bool = False, aggregator: str = "max") -> None:
+                 useless_variables: int = 0, noise_level: float = 0, noise_dissymmetry: bool = False,
+                 rotation: bool = False, translation_factor: float = 1., hashing: bool = False,
+                 aggregator: str = "max") -> None:
         # pylint: disable=too-many-locals
         self._parameters = {x: y for x, y in locals().items() if x not in ["__class__", "self"]}
         # basic checks
@@ -75,10 +78,10 @@ class ArtificialFunction(BaseFunction):
         assert isinstance(translation_factor, (float, int)), f"Got non-float value {translation_factor}"
         if name not in corefuncs.registry:
             available = ", ".join(self.list_sorted_function_names())
-            raise ValueError(f'Unknown core function "{name}". Avaible names are:\n-----\n{available}')
+            raise ValueError(f'Unknown core function "{name}". Available names are:\n-----\n{available}')
         # record necessary info and prepare transforms
         dimension = block_dimension * num_blocks + useless_variables
-        super().__init__(dimension, noise_level)
+        super().__init__(dimension, noise_level=noise_level, noise_dissymmetry=noise_dissymmetry)
         self._aggregator = {"max": max, "mean": np.mean, "sum": sum}[aggregator]
         self._transforms: List[utils.Transform] = []
         # special case
@@ -96,7 +99,7 @@ class ArtificialFunction(BaseFunction):
         return sorted(corefuncs.registry)
 
     def initialize(self) -> None:
-        """Delayed initializations of the transforms to avoid slowing down the instance creation
+        """Delayed initialization of the transforms to avoid slowing down the instance creation
         (makes unit testing much faster).
         This functions creates the random transform used upon each block (translation + optional rotation).
         """

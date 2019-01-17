@@ -5,6 +5,7 @@
 
 import abc
 import time
+from numbers import Real
 import warnings
 from typing import Optional, Tuple, Callable, Any, Dict, List, Union
 import numpy as np
@@ -66,7 +67,7 @@ class Optimizer(abc.ABC):  # pylint: disable=too-many-instance-attributes
         # keep a record of evaluations, and current bests which are updated at each new evaluation
         self.archive: Dict[Tuple[float, ...], utils.Value] = {}
         self.current_bests = {x: utils.Point(tuple(0. for _ in range(dimension)), utils.Value(np.inf))
-                              for x in ["optimistic", "pessimistic"]}
+                              for x in ["optimistic", "pessimistic", "average"]}
         # instance state
         self._num_suggestions = 0
         self._num_evaluations = 0
@@ -116,6 +117,8 @@ class Optimizer(abc.ABC):  # pylint: disable=too-many-instance-attributes
         value: float
             value of the function
         """
+        if not isinstance(value, Real):
+            raise TypeError(f'"tell" method only supports float values but the passed value was: {value} (type: {type(value)}.')
         if np.isnan(value) or value == np.inf:
             warnings.warn(f"Updating fitness with {value} value")
         x = tuple(x)
@@ -125,9 +128,9 @@ class Optimizer(abc.ABC):  # pylint: disable=too-many-instance-attributes
             self.archive[x].add_evaluation(value)
         # update current best records
         # this may have to be improved if we want to keep more kinds of best values
-        for name in ["optimistic", "pessimistic"]:
+        for name in ["optimistic", "pessimistic", "average"]:
             if x == self.current_bests[name].x:   # reboot
-                y: Tuple[float, ...] = min(self.archive, key=lambda x, n=name: self.archive[x].get_estimation(n))  # type: ignore
+                y: Tuple[float, ...] = min(self.archive, key=lambda x, n=name: self.archive[x].get_estimation(n))
                 # rebuild best point may change, and which value did not track the updated value anyway
                 self.current_bests[name] = utils.Point(y, self.archive[y])
             else:
