@@ -1,4 +1,4 @@
-# Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved.
+# Copyright (c) Meta Platforms, Inc. and affiliates.
 #
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
@@ -8,12 +8,12 @@
 # - Marcus Gallagher, University of Queensland
 # - Mike Preuss, LIACS, Leiden University
 
-from typing import Tuple, Optional
 import numpy as np
+import pandas as pd
 import scipy.spatial
-from nevergrad.functions import BaseFunction
-from nevergrad.common.typetools import ArrayLike
-from nevergrad.instrumentation.variables import OrderedDiscrete
+from nevergrad.parametrization import parameter as p
+import nevergrad.common.typing as tp
+from ..base import ExperimentFunction
 from . import datasets
 
 
@@ -22,12 +22,12 @@ def _kmeans_distance(points: np.ndarray, centers: np.ndarray) -> float:
     after affecting each points to the closest center.
     """
     assert points.shape[1] == centers.shape[1]
-    distances = np.sum((points[:, :, None] - centers.T[None, :, :])**2, axis=1)
+    distances = np.sum((points[:, :, None] - centers.T[None, :, :]) ** 2, axis=1)
     affect = np.min(distances, axis=1)
     return float(np.sum(affect))
 
 
-class Clustering(BaseFunction):
+class Clustering(ExperimentFunction):
     """Cost function of a clustering problem.
 
     Parameters
@@ -39,13 +39,12 @@ class Clustering(BaseFunction):
     """
 
     def __init__(self, points: np.ndarray, num_clusters: int, rescale: bool = True) -> None:
-        super().__init__(dimension=num_clusters * points.shape[1])
         self.num_clusters = num_clusters
         self._points = np.array(points, copy=True)
         if rescale:
             self._points -= np.mean(self._points, axis=0, keepdims=True)
             self._points /= np.std(self._points, axis=0, keepdims=True)
-        self._descriptors.update(num_clusters=num_clusters, rescale=rescale)
+        super().__init__(self._compute_distance, p.Array(shape=(num_clusters, points.shape[1])))
 
     @classmethod
     def from_mlda(cls, name: str, num_clusters: int, rescale: bool = True) -> "Clustering":
@@ -67,22 +66,17 @@ class Clustering(BaseFunction):
         assert name in ["Ruspini", "German towns"]
         points = datasets.get_data(name)
         pb = cls(points=points, num_clusters=num_clusters, rescale=rescale)
-        pb._descriptors.update(name=name)
+        pb.add_descriptors(name=name)
         return pb
 
-    def reshape_to_points(self, x: ArrayLike) -> np.ndarray:
-        """Reshapes centroid data to num_clusters x n
-        """
-        return np.array(x).reshape((self.num_clusters, self._points.shape[1]))
-
-    def oracle_call(self, x: ArrayLike) -> float:
+    def _compute_distance(self, centers: np.ndarray) -> float:
         """Sum of minimum squared distances to closest centroid
+        centers must be of size num_clusters x n
         """
-        centers = self.reshape_to_points(x)
         return _kmeans_distance(self._points, centers)
 
 
-class Perceptron(BaseFunction):
+class Perceptron(ExperimentFunction):
     """Perceptron function
 
     Parameters
@@ -98,7 +92,7 @@ class Perceptron(BaseFunction):
         assert y.ndim == 1
         self._x = x
         self._y = y
-        super().__init__(dimension=10)
+        super().__init__(self._compute_loss, p.Array(shape=(10,)))
 
     @classmethod
     def from_mlda(cls, name: str) -> "Perceptron":
@@ -117,10 +111,10 @@ class Perceptron(BaseFunction):
         """
         data = datasets.make_perceptron_data(name)
         pb = cls(data[:, 0], data[:, 1])
-        pb._descriptors.update(name=name)
+        pb.add_descriptors(name=name)
         return pb
 
-    def apply(self, parameters: ArrayLike) -> np.ndarray:
+    def apply(self, parameters: tp.ArrayLike) -> np.ndarray:
         """Apply the perceptron transform to x using the provided parameters
 
         Parameters
@@ -133,29 +127,29 @@ class Perceptron(BaseFunction):
         np.ndarray
             transformed data
         """
-        parameters = np.array(parameters, copy=False)
+        parameters = np.asarray(parameters)
         assert parameters.shape == (10,)
-        output = np.tanh(self._x[:, None] * parameters[None, :3] + parameters[None, 3: 6])
-        output *= parameters[None, 6: 9]
-        output = np.sum(output, axis=1) + parameters[-1]
+        tmp = np.tanh(self._x[:, None] * parameters[None, :3] + parameters[None, 3:6])
+        tmp *= parameters[None, 6:9]
+        output: np.ndarray = np.sum(tmp, axis=1) + parameters[-1]
         return output
 
-    def oracle_call(self, x: ArrayLike) -> float:
-        """Compute perceptron
-        """
+    def _compute_loss(self, x: tp.ArrayLike) -> float:
+        """Compute perceptron"""
         gx = self.apply(x)
-        return float(np.mean((gx - self._y)**2))
+        return float(np.mean((gx - self._y) ** 2))
 
 
-class SammonMapping(BaseFunction):
-    """Sammon mapping function
-    """
+class SammonMapping(ExperimentFunction):
+    """Sammon mapping function"""
 
     def __init__(self, proximity_array: np.ndarray) -> None:
         self._proximity = proximity_array
         self._proximity_2 = self._proximity**2
-        self._proximity_2[self._proximity_2 == 0] = 1  # avoid ZeroDivision (for diagonal terms, or identical points)
-        super().__init__(dimension=self._proximity.shape[0] * 2)
+        self._proximity_2[self._proximity_2 == 0] = (
+            1  # avoid ZeroDivision (for diagonal terms, or identical points)
+        )
+        super().__init__(self._compute_distance, p.Array(shape=(self._proximity.shape[0], 2)))
 
     @classmethod
     def from_mlda(cls, name: str, rescale: bool = False) -> "SammonMapping":
@@ -166,7 +160,8 @@ class SammonMapping(BaseFunction):
         Parameters
         ----------
         name: str
-            name of the dataset (among "Virus", "Employees")
+            name of the dataset (initially among "Virus", "Employees", but Employees dataset is not
+            available online anymore)
 
         Notes
         -----
@@ -174,8 +169,9 @@ class SammonMapping(BaseFunction):
         - for "Employees", we use the online proximity matrix
         - for "Virus", we compute a proximity matrix from raw data (no normalization)
         """
-        assert name in ["Virus", "Employees"]
-        raw_data = datasets.get_data(name)
+        assert name in ["Virus", "Employees"], f"Unkwnown name {name}"
+        assert name != "Employees", "The Employees dataset is not available anymore"
+        raw_data: pd.DataFrame = datasets.get_data(name)  # type: ignore
         if name == "Employees":
             if rescale:
                 raise ValueError("Impossible to rescale with 'Employees'")
@@ -185,58 +181,32 @@ class SammonMapping(BaseFunction):
             if rescale:
                 raw_data -= np.mean(raw_data, axis=0, keepdims=True)
                 raw_data /= np.std(raw_data, axis=0, keepdims=True)
-            proximity = scipy.spatial.distance_matrix(raw_data, raw_data)  # for Virus, the proximity matrix must be computed
+            proximity = scipy.spatial.distance_matrix(
+                raw_data, raw_data
+            )  # for Virus, the proximity matrix must be computed
         pb = cls(proximity)
-        pb._descriptors.update(name=name, rescale=rescale)
+        pb.add_descriptors(name=name, rescale=rescale)
         return pb
 
     @classmethod
     def from_2d_circle(cls, num_points: int = 12) -> "SammonMapping":
-        """Simple test case where the points are in a 2d circle.
-        """
+        """Simple test case where the points are in a 2d circle."""
         idata = np.exp(np.linspace(0, 2 * np.pi, num_points) * 1j)
         data = np.zeros((num_points, 2))
         data[:, 0] = np.real(idata)
         data[:, 1] = np.imag(idata)
         instance = cls(scipy.spatial.distance_matrix(data, data))
-        instance._descriptors.update(name="circle", num_points=num_points)
+        instance.add_descriptors(name="circle", num_points=num_points)
         return instance
 
-    def reshape_to_points(self, x: ArrayLike) -> np.ndarray:
-        """Reshape the points data to num_points x 2
-        """
-        return np.array(x, copy=False).reshape(self.dimension // 2, 2)
-
-    def oracle_call(self, x: ArrayLike) -> float:
-        """Compute the Sammon mapping metric for the input data
-        """
-        x = self.reshape_to_points(x)
+    def _compute_distance(self, x: np.ndarray) -> float:
+        """Compute the Sammon mapping metric for the input data"""
         proximity = scipy.spatial.distance_matrix(x, x)
-        norm_prox = (proximity - self._proximity)**2 / self._proximity_2
+        norm_prox = (proximity - self._proximity) ** 2 / self._proximity_2
         return float(np.sum(norm_prox.ravel()))
 
 
-def _normalized(func: "Landscape", x: np.ndarray) -> np.ndarray:
-    "Normalization function for Landscape"
-    return (np.array(x, copy=False) + 1) * (np.array(func._image.shape) - 1) / 2
-
-
-class _GaussianNorm:
-    """Gaussian normalization function, as a class to avoid resinstanciation of the OrderedDiscrete variables
-    """
-
-    def __init__(self) -> None:
-        self._variables: Optional[Tuple[OrderedDiscrete, ...]] = None
-
-    def __call__(self, func: "Landscape", x: np.ndarray) -> np.ndarray:
-        if self._variables is None:
-            shape = func._image.shape
-            self._variables = tuple(OrderedDiscrete(list(range(x))) for x in shape)
-        assert self._variables is not None
-        return np.array([v.process([y]) for v, y in zip(self._variables, x)])
-
-
-class Landscape(BaseFunction):
+class Landscape(ExperimentFunction):
     """Planet Earth Landscape problem defined in
     Machine Learning and Data Analysis (MLDA) Problem Set v1.0, Gallagher et al., 2018, PPSN
     https://drive.google.com/file/d/1fc1sVwoLJ0LsQ5fzi4jo3rDJHQ6VGQ1h/view
@@ -245,8 +215,7 @@ class Landscape(BaseFunction):
     Parameters
     ----------
     transform: None, "gaussian" or "square"
-        whether use the image [0, 4319]x[0, 2159] (None) to normalize to [-1, 1]x[-1, 1] domain (square),
-        or to use a Gaussian transform.
+        whether use the image [0, 4319]x[0, 2159] (None) or to use a Gaussian transform.
 
     Note
     ----
@@ -257,16 +226,27 @@ class Landscape(BaseFunction):
       since it is an artificial rescaling to greyscale of a color image.
     """
 
-    # the syntax with typing seems a bit complex to make work, since this is no more a BaseFunction
-    _TRANSFORMS = {"square": _normalized, "gaussian": _GaussianNorm()}
-
-    def __init__(self, transform: Optional[str] = "square") -> None:
+    def __init__(self, transform: tp.Optional[str] = None) -> None:
+        super().__init__(
+            self._get_pixel_value, p.Instrumentation(p.Scalar(), p.Scalar()).set_name("standard")
+        )
         self._image = datasets.get_data("Landscape")
-        self._max = float(np.max(self._image.ravel()))
-        super().__init__(dimension=2, transform=transform)
+        if transform == "gaussian":
+            variables = list(p.TransitionChoice(list(range(x))) for x in self._image.shape)
+            self.parametrization = p.Instrumentation(*variables).set_name("gaussian")
+        elif transform == "square":
+            stds = (np.array(self._image.shape) - 1.0) / 2.0
+            variables2 = list(p.Scalar(init=s).set_mutation(sigma=s) for s in stds)
+            self.parametrization = p.Instrumentation(*variables2).set_name(
+                "square"
+            )  # maybe buggy, try again?
+        elif transform is not None:
+            raise ValueError(f"Unknown transform {transform}")
+        self._descriptors.pop("transform", None)  # automatically added by __new__, but not needed
+        self._max = float(self._image.max())
 
-    def oracle_call(self, x: ArrayLike) -> float:
-        x = np.round(x)
-        if np.min(x) < 0 or x[0] >= self._image.shape[0] or x[1] >= self._image.shape[1]:
+    def _get_pixel_value(self, x: float, y: float) -> float:
+        z = np.round([x, y])
+        if np.min(z) < 0 or z[0] >= self._image.shape[0] or z[1] >= self._image.shape[1]:
             return float("inf")  # could propose other limit conditions
-        return float(self._max - self._image[int(x[0]), int(x[1])])
+        return float(self._max - self._image[int(z[0]), int(z[1])])

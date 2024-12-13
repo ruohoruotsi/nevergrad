@@ -1,4 +1,4 @@
-# Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved.
+# Copyright (c) Meta Platforms, Inc. and affiliates.
 #
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
@@ -8,11 +8,12 @@
 
 from math import sqrt, tan, pi
 import numpy as np
-from nevergrad.functions import BaseFunction
-from nevergrad.common.typetools import ArrayLike
+import nevergrad.common.typing as tp
+import nevergrad as ng
+from .. import base
 
 
-def impedance_pix(x: np.ndarray, dpix: float, lam: float, ep0: float, epf: float) -> float:
+def impedance_pix(x: tp.ArrayLike, dpix: float, lam: float, ep0: float, epf: float) -> float:
     """Normalized impedance Z/Z0
     ep0, epf:  epsilons in et out
     lam: lambda in nanometers
@@ -20,20 +21,15 @@ def impedance_pix(x: np.ndarray, dpix: float, lam: float, ep0: float, epf: float
     """
     k0d = 2 * pi * dpix / lam
     Z = 1 / sqrt(epf)
-    for n in reversed(np.sqrt(x)):  # refraction index slab
+    # refraction index slab
+    for n in reversed(np.sqrt(x)):  # type: ignore
         etha = 1 / n  # bulk impedance slab
         Z = etha * (Z + 1j * etha * tan(k0d * n)) / (etha + 1j * Z * tan(k0d * n))
-    R = abs((Z - 1 / sqrt(ep0)) / (Z + 1 / sqrt(ep0)))**2 * 100  # reflection in %
+    R = abs((Z - 1 / sqrt(ep0)) / (Z + 1 / sqrt(ep0))) ** 2 * 100  # reflection in %
     return R
 
 
-def _transform(func: 'ARCoating', x: np.ndarray) -> np.ndarray:
-    """Transform to domain [epmin, epf]^dim
-    """
-    return (func.epf - func.epmin) * .5 * (1 + np.tanh(np.array(x))) + func.epmin
-
-
-class ARCoating(BaseFunction):
+class ARCoating(base.ExperimentFunction):
     """
     Parameters
     ----------
@@ -55,9 +51,7 @@ class ARCoating(BaseFunction):
     University Clermont Auvergne, CNRS, SIGMA Clermont, Institut Pascal
     """
 
-    _TRANSFORMS = {"bound": _transform}
-
-    def __init__(self, nbslab: int = 10, d_ar: int = 400) -> None:
+    def __init__(self, nbslab: int = 10, d_ar: int = 400, bounding_method: str = "bouncing") -> None:
         # Wave length range
         self.lambdas = np.arange(400, 900, 5)  # lambda values from min to max, in nm
         # AR parameters
@@ -67,20 +61,34 @@ class ARCoating(BaseFunction):
         self.ep0 = 1
         self.epf = 9
         self.epmin = 1
-        super().__init__(dimension=nbslab, transform="bound")
-        self._descriptors.update(nbslab=nbslab, d_ar=d_ar)
+        init = (self.epmin + self.epf) / 2.0 * np.ones((nbslab,))
+        sigma = (self.epf - self.ep0) / 6
+        array = ng.p.Array(
+            init=init,
+            mutable_sigma=True,
+        )
+        array.set_mutation(sigma=sigma)
+        array.set_bounds(self.epmin, self.epf, method=bounding_method, full_range_sampling=True)
+        array = ng.ops.mutations.Crossover(0)(array).set_name("")
+        super().__init__(self._get_minimum_average_reflexion, array)
 
-    def oracle_call(self, x: ArrayLike) -> float:
-        """Minimum average reflexion
-        """
-        return self._get_minimum_average_reflexion(x)
-
-    def _get_minimum_average_reflexion(self, x: ArrayLike) -> float:
+    def _get_minimum_average_reflexion(self, x: np.ndarray) -> float:
+        x = np.asarray(x).ravel()
         assert len(x) == self.dimension, f"Expected dimension {self.dimension}, got {len(x)}"
         if np.min(x) < self.epmin or np.max(x) > self.epf:  # acceptability
-            return float('inf')
-        value = 0.
+            return float("inf")
+        value = 0.0
         for lam in self.lambdas:
             RE = impedance_pix(x, self.dpix, lam, self.ep0, self.epf)  # only normal incidence
             value = value + RE / len(self.lambdas)
         return value
+
+    def evaluation_function(self, *recommendations: ng.p.Parameter) -> float:
+        assert len(recommendations) == 1, "Should not be a pareto set for a singleobjective function"
+        x = recommendations[0].value
+        loss = self.function(x)
+        assert isinstance(loss, float)
+        base.update_leaderboard(
+            f'arcoating,{self.parametrization.dimension},{self._descriptors["d_ar"]}', loss, x, verbose=True
+        )
+        return loss
